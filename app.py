@@ -488,6 +488,8 @@ if mode == "PX":
                 **{"Ngày xuất": df_all["Ngày xuất"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else ""),
                    "Ngày bàn giao": df_all["Ngày bàn giao"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else "")}
             ))
+            # ✅ Lưu dữ liệu PX để dùng cho phần so sánh BRAVO
+            st.session_state.last_merged = df_all.copy()
             timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
             write_excel_with_formats(
                 df_all, file_name=f"PX_raw_output_{timestamp}.xlsx", sheet_name="PX_raw",
@@ -656,5 +658,3 @@ if uploaded_bravo and st.session_state.last_merged is not None:
 
 else:
     st.info("⚙️ Hãy xử lý file nhập/xuât trước, sau đó tải file BRAVO để so sánh.")
-
-
