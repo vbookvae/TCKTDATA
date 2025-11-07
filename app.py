@@ -455,7 +455,7 @@ for f in uploaded_files:
     wb = openpyxl.load_workbook(bio, data_only=True)
     workbooks[f.name] = wb
     file_sheets[f.name] = wb.sheetnames
-
+    wb.close()
 st.write("### Chọn sheet để xử lý")
 selected_sheets = {}
 cols = st.columns(min(3, len(file_sheets)))
@@ -489,7 +489,10 @@ if mode == "PX":
                    "Ngày bàn giao": df_all["Ngày bàn giao"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else "")}
             ))
             # ✅ Lưu dữ liệu PX để dùng cho phần so sánh BRAVO
-            st.session_state.last_merged = df_all.copy()
+            # Lưu phiên bản rút gọn (chỉ cột cần so sánh)
+            cols_need = ["Mã CT", "Phiếu nhập", "Phiếu xuất"]
+            cols_exist = [c for c in cols_need if c in df_all.columns]
+            st.session_state.last_merged = df_all[cols_exist].copy()
             timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
             write_excel_with_formats(
                 df_all, file_name=f"PX_raw_output_{timestamp}.xlsx", sheet_name="PX_raw",
@@ -525,7 +528,10 @@ else:  # PN
                 "Ngày bàn giao": df_all["Ngày bàn giao"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else "")}
             ))
             # ✅ Lưu dữ liệu GHEP (PN) vào session để dùng cho bước so sánh BRAVO
-            st.session_state.last_merged = df_all.copy()
+            # Lưu phiên bản rút gọn (chỉ cột cần so sánh)
+            cols_need = ["Mã CT", "Phiếu nhập", "Phiếu xuất"]
+            cols_exist = [c for c in cols_need if c in df_all.columns]
+            st.session_state.last_merged = df_all[cols_exist].copy()
             # Ghi file: cột phiếu dạng Text, ngày dạng Date dd-mm-yyyy
             timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
             write_excel_with_formats(
@@ -566,14 +572,14 @@ if uploaded_bravo:
                 key=f"bravo_{f.name}"
             )
             selected_sheets_bravo[f.name] = selected
-
+        wb.close()
 if uploaded_bravo and st.session_state.last_merged is not None:
     btn_compare = st.button("⚖️ So sánh với file BRAVO")
     if btn_compare:
         # --- Đọc dữ liệu BRAVO ---
         all_bravo = []
         for f in uploaded_bravo:
-            wb = openpyxl.load_workbook(f, data_only=True)
+            wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
             for sheet in selected_sheets_bravo.get(f.name, wb.sheetnames):
                 ws = wb[sheet]
                 # Tìm tiêu đề có "Mã" và "Số"
@@ -627,12 +633,11 @@ if uploaded_bravo and st.session_state.last_merged is not None:
                     row_out = row.to_dict()
                     row_out["Trạng thái"] = "" if co_trong_bravo else "⚠️ Bravo không có"
                     result_rows.append(row_out)
-
+            wb.close()
             df_result = pd.DataFrame(result_rows)
-
             st.dataframe(df_result.head(200))
             st.info(f"Tổng số dòng: {len(df_result)}")
-
+            
             # --- Ghi file Excel với tô màu ---
             out_path = io.BytesIO()
             with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
