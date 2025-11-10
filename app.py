@@ -211,13 +211,14 @@ def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
     Bổ sung:
     ✅ Nếu phần sau dấu '-' có >=4 chữ số thì không ghép left (dùng nguyên)
     ✅ Nếu các phần sau dấu ',' có ký tự lạ hoặc khoảng trắng -> loại bỏ, chỉ giữ số
+    ✅ Với chuỗi có dấu '...' (dạng rút gọn), nếu phần sau '-' có >=4 chữ số thì lấy theo phần đó làm base, không ghép left
     """
     s = str(cell_value).strip()
     if not s:
         return []
     results: List[str] = []
 
-    # --- Dạng rút gọn: <left>-<short>…<end>(<count>)
+    # --- Dạng rút gọn có "..." hoặc "…" và "(count)"
     m = re.fullmatch(r"(\d+)-(\d+)[.…]{3}(\d+)\((\d+)\)", s)
     if m:
         left = m.group(1)
@@ -225,10 +226,15 @@ def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
         end_token = m.group(3)
         count = int(m.group(4))
 
-        base_full = int(left)
-        k_short = len(short_part)
-        if k_short <= len(left):
-            base_full = int(left[:-k_short] + short_part)
+        # ✅ Nếu short_part >=4 chữ số → không ghép left
+        if len(short_part) >= 4:
+            base_full = int(short_part)
+        else:
+            base_full = int(left)
+            k_short = len(short_part)
+            if k_short <= len(left):
+                base_full = int(left[:-k_short] + short_part)
+
         candidate = _replace_tail_full(base_full, end_token)
         start = min(base_full, candidate)
         nums = list(range(start, start + count))
@@ -259,7 +265,6 @@ def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
                 p_digits = re.sub(r"\D", "", p)
                 if not p_digits:
                     continue
-                # thay đuôi của base bằng phần mới
                 next_num = _replace_tail_full(base_num, p_digits)
                 nums.append(next_num)
         else:
@@ -278,7 +283,6 @@ def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
             seen.add(tag)
             uniq.append(tag)
     return uniq
-
 
 def parse_pn_simple_table(ws) -> pd.DataFrame:
     """
