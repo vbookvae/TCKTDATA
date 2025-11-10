@@ -10,7 +10,9 @@ import streamlit as st
 import os
 
 st.set_page_config(page_title="sachnv_phieuxuatnhap", layout="wide")
-st.runtime.legacy_caching.clear_cache()
+st.cache_data.clear()
+st.cache_resource.clear()
+
 DATE_FMT_OUT = "%d-%m-%Y"  # dùng cho hiển thị; khi ghi Excel sẽ set number_format
 
 # ===================== Helpers =====================
