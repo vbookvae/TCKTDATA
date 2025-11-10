@@ -207,9 +207,10 @@ def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
     Tách mọi cụm '<left>-<right>' trong 1 ô, bao gồm cả dạng rút gọn:
     - 138584-56…91(9) → 138556..138564
     - 153502-03…37(10) → 153503..153512
+
     Bổ sung:
-    ✅ Bỏ ký tự lạ / khoảng trắng trong phần sau dấu ","
-    ✅ Nếu phần sau dấu '-' có >=4 chữ số thì dùng nguyên, không ghép với left
+    ✅ Nếu phần sau dấu '-' có >=4 chữ số thì không ghép left (dùng nguyên)
+    ✅ Nếu các phần sau dấu ',' có ký tự lạ hoặc khoảng trắng -> loại bỏ, chỉ giữ số
     """
     s = str(cell_value).strip()
     if not s:
@@ -234,36 +235,39 @@ def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
         results.extend([str(n) for n in nums])
 
     # --- Dạng bình thường hoặc liệt kê
-    for left, right in re.findall(r"(\d+)\s*-\s*([0-9,().\.]+)", s):
+    for left, right in re.findall(r"(\d+)\s*-\s*([0-9,().'’\.\s]+)", s):
         # bỏ qua dạng rút gọn vừa xử lý
         if re.fullmatch(r"\d+[.…]{3}\d+\(\d+\)", right):
             continue
 
-        # ✅ Làm sạch ký tự lạ, khoảng trắng
-        right = re.sub(r"[^0-9,().\.]", "", right)
-        # Tách từng phần theo dấu phẩy
-        parts = [p.strip() for p in right.split(",") if p.strip()]
+        # ✅ Làm sạch ký tự lạ
+        right = re.sub(r"[^0-9,.\s]", "", right).replace(" ", "")
+        parts = [p for p in right.split(",") if p]
+
         if not parts:
             continue
 
         first = parts[0]
-        use_right_as_base = len(first) >= 4  # ✅ Nếu >=4 chữ số → không ghép left
+        use_right_as_base = len(first) >= 4  # >=4 chữ số thì không ghép left
 
-        # Dựng lại chuỗi right sạch
-        cleaned = ",".join(parts)
-
-        # ✅ Nếu không ghép left thì xử lý riêng từng số
+        nums = []
+        # ✅ Nếu phần đầu đủ dài (>=4 chữ số), dùng nguyên và sinh tiếp theo
         if use_right_as_base:
-            for p in parts:
-                p_num = re.sub(r"\D", "", p)
-                if not p_num:
+            base_num = int(first)
+            nums.append(base_num)
+            for p in parts[1:]:
+                p_digits = re.sub(r"\D", "", p)
+                if not p_digits:
                     continue
-                results.append(p_num)
+                # thay đuôi của base bằng phần mới
+                next_num = _replace_tail_full(base_num, p_digits)
+                nums.append(next_num)
         else:
-            # Dùng logic cũ (ghép với left)
-            nums = pn_expand_rhs(cleaned, left_full=left)
-            for n in nums:
-                results.append(str(n))
+            # logic cũ (ghép với left)
+            nums = pn_expand_rhs(right, left_full=left)
+
+        for n in nums:
+            results.append(str(n))
 
     # --- Loại trùng và thêm hậu tố -R nếu cần
     seen = set()
@@ -274,6 +278,7 @@ def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
             seen.add(tag)
             uniq.append(tag)
     return uniq
+
 
 def parse_pn_simple_table(ws) -> pd.DataFrame:
     """
