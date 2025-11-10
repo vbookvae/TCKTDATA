@@ -10,10 +10,14 @@ import streamlit as st
 import os
 
 st.set_page_config(page_title="sachnv_phieuxuatnhap", layout="wide")
+st.runtime.legacy_caching.clear_cache()
 DATE_FMT_OUT = "%d-%m-%Y"  # dùng cho hiển thị; khi ghi Excel sẽ set number_format
 
 # ===================== Helpers =====================
 # ===== PN helpers & expanders (đÃ chuẩn hóa theo yêu cầu) =====
+def safe_restart():
+    st.warning("⚠️ Đã phát hiện lỗi bộ nhớ hoặc crash, app sẽ khởi động lại sau 3 giây...")
+    st.experimental_rerun()
 
 def _replace_tail_full(base_full: int, end_token: str) -> int:
     """Thay *toàn bộ* len(end_token) chữ số cuối của base_full bằng end_token."""
@@ -195,55 +199,70 @@ def pn_expand_rhs(rhs: str, left_full: Optional[str]) -> List[int]:
 
     return out
 
-def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
+import re
+
+def parse_pn_cell(raw: str, want_return_suffix=False) -> list[str]:
     """
-    Tách mọi cụm '<left>-<right>' trong 1 ô, bao gồm cả dạng rút gọn:
-    - 138584-56…91(9) → 138556..138564
-    - 153502-03…37(10) → 153503..153512
+    Tách danh sách số phiếu nhập/xuất từ chuỗi raw.
+    ✅ Bỏ khoảng trắng, ký tự lạ.
+    ✅ Nếu phần sau dấu '-' có >=4 chữ số → dùng làm gốc, không ghép đầu.
+    ✅ Nếu chỉ có 2–3 chữ số → ghép với phần đầu (số phiếu nhập).
+    ✅ Nếu có RETURN → thêm '-R' vào cuối.
     """
-    s = str(cell_value).strip()
-    if not s:
+
+    if not raw or "-" not in raw:
         return []
-    results: List[str] = []
 
-    # --- Dạng rút gọn: <left>-<short>…<end>(<count>)
-    m = re.fullmatch(r"(\d+)-(\d+)[.…]{3}(\d+)\((\d+)\)", s)
-    if m:
-        left = m.group(1)
-        short_part = m.group(2)
-        end_token = m.group(3)
-        count = int(m.group(4))
+    try:
+        left, right = raw.split("-", 1)
+    except ValueError:
+        return []
 
-        # Bước 1: tạo base_full bằng left nhưng thay phần cuối bằng short_part
-        # Nếu short_part dài hơn độ dài left -> giữ nguyên
-        base_full = int(left)
-        k_short = len(short_part)
-        if k_short <= len(left):
-            base_full = int(left[:-k_short] + short_part)
-        # Bước 2: tạo candidate bằng cách thay phần cuối bằng end_token
-        candidate = _replace_tail_full(base_full, end_token)
-        start = min(base_full, candidate)
-        nums = list(range(start, start + count))
-        results.extend([str(n) for n in nums])
+    # Làm sạch toàn bộ chuỗi khỏi ký tự lạ, giữ lại số, phẩy, dấu chấm
+    left = re.sub(r"[^0-9]", "", left or "")
+    right = re.sub(r"[^0-9,.\(\)]", "", right or "")
 
-    # --- Dạng bình thường hoặc liệt kê
-    for left, right in re.findall(r"(\d+)\s*-\s*([0-9,().\.]+)", s):
-        # bỏ qua dạng rút gọn vừa xử lý
-        if re.fullmatch(r"\d+[.…]{3}\d+\(\d+\)", right):
+    # Bỏ dấu cách, tab
+    right = right.replace(" ", "")
+
+    # Lấy phần số chính trước khi có dấu "..." hoặc "("
+    right_main = re.split(r"[.(]", right)[0]
+
+    # Tách các phần sau dấu phẩy
+    parts = [p.strip() for p in right_main.split(",") if p.strip()]
+
+    nums = []
+    if not parts:
+        return []
+
+    base = parts[0]
+    nums.append(base)
+
+    # Nếu số gốc (sau dấu "-") có từ 4 chữ số trở lên → dùng làm gốc cho các phần sau
+    use_right_prefix = len(base) >= 4
+    base_prefix = base[:-len(parts[-1])] if len(base) > len(parts[-1]) else ""
+
+    for p in parts[1:]:
+        # Chỉ lấy chữ số
+        p_digits = re.sub(r"\D", "", p)
+        if not p_digits:
             continue
-        nums = pn_expand_rhs(right, left_full=left)
-        for n in nums:
-            results.append(str(n))
 
-    # Loại trùng và thêm hậu tố -R nếu cần
-    seen = set()
-    uniq = []
-    for x in results:
-        tag = f"{x}-R" if want_return_suffix else x
-        if tag not in seen:
-            seen.add(tag)
-            uniq.append(tag)
-    return uniq
+        if use_right_prefix:
+            # Dùng cùng đầu với base
+            next_num = base[:-len(p_digits)] + p_digits
+        else:
+            # Dùng đầu của phần trái (số phiếu nhập)
+            next_num = left[:-len(p_digits)] + p_digits
+
+        nums.append(next_num)
+
+    # Thêm hậu tố RETURN nếu cần
+    if want_return_suffix:
+        nums = [f"{n}-R" for n in nums]
+
+    # Loại bỏ trùng và trả về
+    return list(dict.fromkeys(nums))
 
 def parse_pn_simple_table(ws) -> pd.DataFrame:
     """
@@ -430,236 +449,242 @@ def parse_pn_sheet(ws) -> pd.DataFrame:
 
     return pd.DataFrame(out_rows)
 
+try:
 
-# ===================== UI ================================
-st.title("KIỂM TRA PHIẾU XUẤT - NHẬP - TỒN")
+    # ===================== UI ================================
+    st.title("KIỂM TRA PHIẾU XUẤT - NHẬP - TỒN")
+    st.markdown("""
+    **Bước 1.** Upload **một hoặc nhiều** file Excel.  
+    **Bước 2.** Chọn đúng **sheet** cần xử lý trong mỗi file.  
+    **Bước 3.** Chọn chế độ **Xử lý phiếu xuất (PX)** hoặc **Xử lý phiếu nhập (PN)** → bấm **Xử lý** để xử lý file.
+    **Bước 4.** liên hệ nguyenvansach báo lỗi (nếu cần).
+    """)
 
-st.markdown("""
-**Bước 1.** Upload **một hoặc nhiều** file Excel.  
-**Bước 2.** Chọn đúng **sheet** cần xử lý trong mỗi file.  
-**Bước 3.** Chọn chế độ **Xử lý phiếu xuất (PX)** hoặc **Xử lý phiếu nhập (PN)** → bấm **Xử lý** để xử lý file.
-**Bước 4.** liên hệ nguyenvansach báo lỗi (nếu cần).
-""")
+    uploaded_files = st.file_uploader("Chọn file Excel", type=["xlsx", "xlsm"], accept_multiple_files=True)
 
-uploaded_files = st.file_uploader("Chọn file Excel", type=["xlsx", "xlsm"], accept_multiple_files=True)
-
-if not uploaded_files:
-    st.info("Hãy tải lên ít nhất một file Excel.")
-    st.stop()
-
-# load workbooks
-workbooks = {}
-file_sheets = {}
-for f in uploaded_files:
-    bio = io.BytesIO(f.read())
-    wb = openpyxl.load_workbook(bio, data_only=True)
-    workbooks[f.name] = wb
-    file_sheets[f.name] = wb.sheetnames
-    wb.close()
-st.write("### Chọn sheet để xử lý")
-selected_sheets = {}
-cols = st.columns(min(3, len(file_sheets)))
-for i, (fname, sheets) in enumerate(file_sheets.items()):
-    with cols[i % len(cols)]:
-        st.caption(f"**{fname}**")
-        selected = st.multiselect(f"Sheet trong {fname}", sheets, default=sheets, key=f"ms_{fname}")
-        selected_sheets[fname] = selected
-
-mode = st.radio("Chọn loại phiếu cần xử lý", options=["PX","PN"], horizontal=True)
-
-if mode == "PX":
-    if st.button("Xử lý dữ liệu phiếu xuất", type="primary"):
-        all_rows = []
-        for fname, sheets in selected_sheets.items():
-            wb = workbooks[fname]
-            for sheet in sheets:
-                ws = wb[sheet]
-                df = parse_px_sheet(ws)
-                if not df.empty:
-                    df.insert(0, "File", fname)
-                    df.insert(1, "Sheet", sheet)
-                    all_rows.append(df)
-        if not all_rows:
-            st.warning("Không trích xuất được dữ liệu phiếu xuất từ các sheet đã chọn.")
-        else:
-            df_all = pd.concat(all_rows, ignore_index=True)
-            st.success(f"Đã trích xuất {len(df_all)} dòng PX.")
-            st.dataframe(df_all.head(200).assign(
-                **{"Ngày xuất": df_all["Ngày xuất"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else ""),
-                   "Ngày bàn giao": df_all["Ngày bàn giao"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else "")}
-            ))
-            # ✅ Lưu dữ liệu PX để dùng cho phần so sánh BRAVO
-            # Lưu phiên bản rút gọn (chỉ cột cần so sánh)
-            cols_need = ["Mã CT", "Phiếu nhập", "Phiếu xuất"]
-            cols_exist = [c for c in cols_need if c in df_all.columns]
-            st.session_state.last_merged = df_all[cols_exist].copy()
-            timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
-            write_excel_with_formats(
-                df_all, file_name=f"PX_raw_output_{timestamp}.xlsx", sheet_name="PX_raw",
-                ticket_col="Phiếu xuất", date_cols=["Ngày xuất", "Ngày bàn giao"]
-            )
-
-else:  # PN
-    if st.button("Xử lý dữ liệu phiếu nhập", type="primary"):
-        all_rows = []
-        for fname, sheets in selected_sheets.items():
-            wb = workbooks[fname]
-            for sheet in sheets:
-                ws = wb[sheet]
-                df = parse_pn_sheet(ws)
-                if not df.empty:
-                    df.insert(0, "File", fname)
-                    df.insert(1, "Sheet", sheet)
-                    all_rows.append(df)
-        if not all_rows:
-            st.warning("Không trích xuất được dữ liệu phiếu nhập từ các sheet đã chọn.")
-        else:
-            df_all = pd.concat(all_rows, ignore_index=True)
-            # ... trong nhánh if mode == "PN": sau khi df_all = pd.concat(...)
-            order = ["File","Sheet","Số phiếu gốc","Mã CT","Nguồn","Phiếu nhập","Ngày nhập","Ngày bàn giao"]
-            for col in order:
-                if col not in df_all.columns:
-                    df_all[col] = ""    # phòng khi sheet nào đó thiếu
-            df_all = df_all.reindex(columns=order)
-
-            st.success(f"Đã trích xuất {len(df_all)} dòng PN.")
-            st.dataframe(df_all.head(200).assign(
-                **{"Ngày nhập": df_all["Ngày nhập"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else ""),
-                "Ngày bàn giao": df_all["Ngày bàn giao"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else "")}
-            ))
-            # ✅ Lưu dữ liệu GHEP (PN) vào session để dùng cho bước so sánh BRAVO
-            # Lưu phiên bản rút gọn (chỉ cột cần so sánh)
-            cols_need = ["Mã CT", "Phiếu nhập", "Phiếu xuất"]
-            cols_exist = [c for c in cols_need if c in df_all.columns]
-            st.session_state.last_merged = df_all[cols_exist].copy()
-            # Ghi file: cột phiếu dạng Text, ngày dạng Date dd-mm-yyyy
-            timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
-            write_excel_with_formats(
-                df_all,
-                file_name=f"PN_raw_output_{timestamp}.xlsx",
-                sheet_name="PN_raw",
-                ticket_col="Phiếu nhập",
-                date_cols=["Ngày nhập", "Ngày bàn giao"]
-            )
-import pandas as pd
-from openpyxl.styles import PatternFill
-
-st.markdown("---")
-st.header("🔍 So sánh số phiếu với số phiếu trên BRAVO")
-
-uploaded_bravo = st.file_uploader(
-    "Tải các file xuất ra từ BRAVO để so sánh (Đảm bảo cột A=Mã, cột C=Số phiếu)",
-    type=["xlsx", "xlsm"],
-    accept_multiple_files=True,
-    key="bravo"
-)
-
-if "last_merged" not in st.session_state:
-    st.session_state.last_merged = None
-
-if uploaded_bravo:
-    st.write("### Chọn sheet cần so sánh trong từng file:")
-    selected_sheets_bravo = {}
-    cols = st.columns(min(3, len(uploaded_bravo)))
-    for i, f in enumerate(uploaded_bravo):
-        wb = openpyxl.load_workbook(f, read_only=True)
-        with cols[i % len(cols)]:
-            st.caption(f"**{f.name}**")
-            selected = st.multiselect(
-                f"Sheet trong {f.name}",
-                wb.sheetnames,
-                default=wb.sheetnames,
-                key=f"bravo_{f.name}"
-            )
-            selected_sheets_bravo[f.name] = selected
+    if not uploaded_files:
+        st.info("Hãy tải lên ít nhất một file Excel.")
+        st.stop()
+    # load workbooks
+    workbooks = {}
+    file_sheets = {}
+    for f in uploaded_files:
+        bio = io.BytesIO(f.read())
+        wb = openpyxl.load_workbook(bio, data_only=True)
+        workbooks[f.name] = wb
+        file_sheets[f.name] = wb.sheetnames
         wb.close()
-if uploaded_bravo and st.session_state.last_merged is not None:
-    btn_compare = st.button("⚖️ So sánh với file BRAVO")
-    if btn_compare:
-        # --- Đọc dữ liệu BRAVO ---
-        all_bravo = []
-        for f in uploaded_bravo:
-            wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
-            for sheet in selected_sheets_bravo.get(f.name, wb.sheetnames):
-                ws = wb[sheet]
-                # Tìm tiêu đề có "Mã" và "Số"
-                header_row = None
-                for r in range(1, 10):
-                    row_vals = [ws.cell(r, c).value for c in range(1, 6)]
-                    if any(str(v).strip().upper() == "MÃ" for v in row_vals if v):
-                        header_row = r
-                        break
-                if not header_row:
-                    continue
-                col_ma = 1  # A
-                col_so = 3  # C
-                rows = []
-                for r in range(header_row + 1, ws.max_row + 1):
-                    ma = ws.cell(r, col_ma).value
-                    so = ws.cell(r, col_so).value
-                    if ma and so:
-                        ma = str(ma).strip().upper()
-                        # bỏ khoảng trắng trong số
-                        so_text = str(so).strip().replace(" ", "")
-                        rows.append({"Mã": ma, "Số": so_text})
-                if rows:
-                    df_b = pd.DataFrame(rows)
-                    df_b["File"] = f.name
-                    df_b["Sheet"] = sheet
-                    all_bravo.append(df_b)
-        if not all_bravo:
-            st.warning("❌ Không đọc được dữ liệu hợp lệ từ file BRAVO.")
-        else:
-            df_bravo = pd.concat(all_bravo, ignore_index=True)
-            st.success(f"✅ Đã đọc {len(df_bravo)} dòng từ {len(uploaded_bravo)} file BRAVO.")
+    st.write("### Chọn sheet để xử lý")
+    selected_sheets = {}
+    cols = st.columns(min(3, len(file_sheets)))
+    for i, (fname, sheets) in enumerate(file_sheets.items()):
+        with cols[i % len(cols)]:
+            st.caption(f"**{fname}**")
+            selected = st.multiselect(f"Sheet trong {fname}", sheets, default=sheets, key=f"ms_{fname}")
+            selected_sheets[fname] = selected
 
-            # --- So sánh ---
-            df_ghep = st.session_state.last_merged.copy()
-            df_ghep["Loại"] = df_ghep["Mã CT"].str.upper().str.strip()
-            df_bravo["Loại"] = df_bravo["Mã"].str.upper().str.strip()
+    mode = st.radio("Chọn loại phiếu cần xử lý", options=["PX","PN"], horizontal=True)
 
-            # Chuẩn hóa tên cột so sánh
-            col_map = {"PX": "Phiếu xuất", "PN": "Phiếu nhập"}
-            result_rows = []
-            for loai in ["PX", "PN"]:
-                col_phieu = col_map[loai]
-                df_gh = df_ghep[df_ghep["Loại"] == loai].copy()
-                df_br = df_bravo[df_bravo["Loại"] == loai].copy()
-                bravo_set = set(df_br["Số"].astype(str).str.replace(" ", ""))
+    if mode == "PX":
+        if st.button("Xử lý dữ liệu phiếu xuất", type="primary"):
+            all_rows = []
+            for fname, sheets in selected_sheets.items():
+                wb = workbooks[fname]
+                for sheet in sheets:
+                    ws = wb[sheet]
+                    df = parse_px_sheet(ws)
+                    if not df.empty:
+                        df.insert(0, "File", fname)
+                        df.insert(1, "Sheet", sheet)
+                        all_rows.append(df)
+            if not all_rows:
+                st.warning("Không trích xuất được dữ liệu phiếu xuất từ các sheet đã chọn.")
+            else:
+                df_all = pd.concat(all_rows, ignore_index=True)
+                st.success(f"Đã trích xuất {len(df_all)} dòng PX.")
+                st.dataframe(df_all.head(200).assign(
+                    **{"Ngày xuất": df_all["Ngày xuất"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else ""),
+                    "Ngày bàn giao": df_all["Ngày bàn giao"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else "")}
+                ))
+                # ✅ Lưu dữ liệu PX để dùng cho phần so sánh BRAVO
+                # Lưu phiên bản rút gọn (chỉ cột cần so sánh)
+                cols_need = ["Mã CT", "Phiếu nhập", "Phiếu xuất"]
+                cols_exist = [c for c in cols_need if c in df_all.columns]
+                st.session_state.last_merged = df_all[cols_exist].copy()
+                timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
+                write_excel_with_formats(
+                    df_all, file_name=f"PX_raw_output_{timestamp}.xlsx", sheet_name="PX_raw",
+                    ticket_col="Phiếu xuất", date_cols=["Ngày xuất", "Ngày bàn giao"]
+                )
 
-                for _, row in df_gh.iterrows():
-                    so_phieu = str(row[col_phieu]).strip().replace(" ", "")
-                    co_trong_bravo = so_phieu in bravo_set
-                    row_out = row.to_dict()
-                    row_out["Trạng thái"] = "" if co_trong_bravo else "⚠️ Bravo không có"
-                    result_rows.append(row_out)
+    else:  # PN
+        if st.button("Xử lý dữ liệu phiếu nhập", type="primary"):
+            all_rows = []
+            for fname, sheets in selected_sheets.items():
+                wb = workbooks[fname]
+                for sheet in sheets:
+                    ws = wb[sheet]
+                    df = parse_pn_sheet(ws)
+                    if not df.empty:
+                        df.insert(0, "File", fname)
+                        df.insert(1, "Sheet", sheet)
+                        all_rows.append(df)
+            if not all_rows:
+                st.warning("Không trích xuất được dữ liệu phiếu nhập từ các sheet đã chọn.")
+            else:
+                df_all = pd.concat(all_rows, ignore_index=True)
+                # ... trong nhánh if mode == "PN": sau khi df_all = pd.concat(...)
+                order = ["File","Sheet","Số phiếu gốc","Mã CT","Nguồn","Phiếu nhập","Ngày nhập","Ngày bàn giao"]
+                for col in order:
+                    if col not in df_all.columns:
+                        df_all[col] = ""    # phòng khi sheet nào đó thiếu
+                df_all = df_all.reindex(columns=order)
+
+                st.success(f"Đã trích xuất {len(df_all)} dòng PN.")
+                st.dataframe(df_all.head(200).assign(
+                    **{"Ngày nhập": df_all["Ngày nhập"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else ""),
+                    "Ngày bàn giao": df_all["Ngày bàn giao"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else "")}
+                ))
+                # ✅ Lưu dữ liệu GHEP (PN) vào session để dùng cho bước so sánh BRAVO
+                # Lưu phiên bản rút gọn (chỉ cột cần so sánh)
+                cols_need = ["Mã CT", "Phiếu nhập", "Phiếu xuất"]
+                cols_exist = [c for c in cols_need if c in df_all.columns]
+                st.session_state.last_merged = df_all[cols_exist].copy()
+                # Ghi file: cột phiếu dạng Text, ngày dạng Date dd-mm-yyyy
+                timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
+                write_excel_with_formats(
+                    df_all,
+                    file_name=f"PN_raw_output_{timestamp}.xlsx",
+                    sheet_name="PN_raw",
+                    ticket_col="Phiếu nhập",
+                    date_cols=["Ngày nhập", "Ngày bàn giao"]
+                )
+    import pandas as pd
+    from openpyxl.styles import PatternFill
+
+    st.markdown("---")
+    st.header("🔍 So sánh số phiếu với số phiếu trên BRAVO")
+
+    uploaded_bravo = st.file_uploader(
+        "Tải các file xuất ra từ BRAVO để so sánh (Đảm bảo cột A=Mã, cột C=Số phiếu)",
+        type=["xlsx", "xlsm"],
+        accept_multiple_files=True,
+        key="bravo"
+    )
+
+    if "last_merged" not in st.session_state:
+        st.session_state.last_merged = None
+
+    if uploaded_bravo:
+        st.write("### Chọn sheet cần so sánh trong từng file:")
+        selected_sheets_bravo = {}
+        cols = st.columns(min(3, len(uploaded_bravo)))
+        for i, f in enumerate(uploaded_bravo):
+            wb = openpyxl.load_workbook(f, read_only=True)
+            with cols[i % len(cols)]:
+                st.caption(f"**{f.name}**")
+                selected = st.multiselect(
+                    f"Sheet trong {f.name}",
+                    wb.sheetnames,
+                    default=wb.sheetnames,
+                    key=f"bravo_{f.name}"
+                )
+                selected_sheets_bravo[f.name] = selected
             wb.close()
-            df_result = pd.DataFrame(result_rows)
-            st.dataframe(df_result.head(200))
-            st.info(f"Tổng số dòng: {len(df_result)}")
-            
-            # --- Ghi file Excel với tô màu ---
-            out_path = io.BytesIO()
-            with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-                df_result.to_excel(writer, index=False, sheet_name="So_sanh")
-                ws = writer.book["So_sanh"]
-                headers = {cell.value: cell.col_idx for cell in ws[1]}
-                col_phieu = headers.get("Phiếu nhập") or headers.get("Phiếu xuất")
-                col_trangthai = headers.get("Trạng thái")
+    if uploaded_bravo and st.session_state.last_merged is not None:
+        btn_compare = st.button("⚖️ So sánh với file BRAVO")
+        if btn_compare:
+            # --- Đọc dữ liệu BRAVO ---
+            all_bravo = []
+            for f in uploaded_bravo:
+                wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
+                for sheet in selected_sheets_bravo.get(f.name, wb.sheetnames):
+                    ws = wb[sheet]
+                    # Tìm tiêu đề có "Mã" và "Số"
+                    header_row = None
+                    for r in range(1, 10):
+                        row_vals = [ws.cell(r, c).value for c in range(1, 6)]
+                        if any(str(v).strip().upper() == "MÃ" for v in row_vals if v):
+                            header_row = r
+                            break
+                    if not header_row:
+                        continue
+                    col_ma = 1  # A
+                    col_so = 3  # C
+                    rows = []
+                    for r in range(header_row + 1, ws.max_row + 1):
+                        ma = ws.cell(r, col_ma).value
+                        so = ws.cell(r, col_so).value
+                        if ma and so:
+                            ma = str(ma).strip().upper()
+                            # bỏ khoảng trắng trong số
+                            so_text = str(so).strip().replace(" ", "")
+                            rows.append({"Mã": ma, "Số": so_text})
+                    if rows:
+                        df_b = pd.DataFrame(rows)
+                        df_b["File"] = f.name
+                        df_b["Sheet"] = sheet
+                        all_bravo.append(df_b)
+            if not all_bravo:
+                st.warning("❌ Không đọc được dữ liệu hợp lệ từ file BRAVO.")
+            else:
+                df_bravo = pd.concat(all_bravo, ignore_index=True)
+                st.success(f"✅ Đã đọc {len(df_bravo)} dòng từ {len(uploaded_bravo)} file BRAVO.")
 
-                yellow = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")
-                for r in range(2, ws.max_row + 1):
-                    if ws.cell(r, col_trangthai).value == "⚠️ Bravo không có":
-                        if col_phieu:
-                            ws.cell(r, col_phieu).fill = yellow
-                        ws.cell(r, col_trangthai).fill = yellow
-            timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
-            st.download_button(
-                "⬇️ Tải file kết quả so sánh",
-                data=out_path.getvalue(),
-                file_name=f"So_sanh_PX_PN_vs_BRAVO_{timestamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                # --- So sánh ---
+                df_ghep = st.session_state.last_merged.copy()
+                df_ghep["Loại"] = df_ghep["Mã CT"].str.upper().str.strip()
+                df_bravo["Loại"] = df_bravo["Mã"].str.upper().str.strip()
 
-else:
-    st.info("⚙️ Hãy xử lý file nhập/xuât trước, sau đó tải file BRAVO để so sánh.")
+                # Chuẩn hóa tên cột so sánh
+                col_map = {"PX": "Phiếu xuất", "PN": "Phiếu nhập"}
+                result_rows = []
+                for loai in ["PX", "PN"]:
+                    col_phieu = col_map[loai]
+                    df_gh = df_ghep[df_ghep["Loại"] == loai].copy()
+                    df_br = df_bravo[df_bravo["Loại"] == loai].copy()
+                    bravo_set = set(df_br["Số"].astype(str).str.replace(" ", ""))
+
+                    for _, row in df_gh.iterrows():
+                        so_phieu = str(row[col_phieu]).strip().replace(" ", "")
+                        co_trong_bravo = so_phieu in bravo_set
+                        row_out = row.to_dict()
+                        row_out["Trạng thái"] = "" if co_trong_bravo else "⚠️ Bravo không có"
+                        result_rows.append(row_out)
+                wb.close()
+                df_result = pd.DataFrame(result_rows)
+                st.dataframe(df_result.head(200))
+                st.info(f"Tổng số dòng: {len(df_result)}")
+                
+                # --- Ghi file Excel với tô màu ---
+                out_path = io.BytesIO()
+                with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+                    df_result.to_excel(writer, index=False, sheet_name="So_sanh")
+                    ws = writer.book["So_sanh"]
+                    headers = {cell.value: cell.col_idx for cell in ws[1]}
+                    col_phieu = headers.get("Phiếu nhập") or headers.get("Phiếu xuất")
+                    col_trangthai = headers.get("Trạng thái")
+
+                    yellow = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")
+                    for r in range(2, ws.max_row + 1):
+                        if ws.cell(r, col_trangthai).value == "⚠️ Bravo không có":
+                            if col_phieu:
+                                ws.cell(r, col_phieu).fill = yellow
+                            ws.cell(r, col_trangthai).fill = yellow
+                timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
+                st.download_button(
+                    "⬇️ Tải file kết quả so sánh",
+                    data=out_path.getvalue(),
+                    file_name=f"So_sanh_PX_PN_vs_BRAVO_{timestamp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+    else:
+        st.info("⚙️ Hãy xử lý file nhập/xuât trước, sau đó tải file BRAVO để so sánh.")
+
+except MemoryError:
+    safe_restart("thiếu bộ nhớ")
+
+except Exception as e:
+    st.error(f"❌ Lỗi không mong muốn: {e}")
+    safe_restart("lỗi không xác định")
