@@ -10,15 +10,16 @@ import streamlit as st
 import os
 
 st.set_page_config(page_title="sachnv_phieuxuatnhap", layout="wide")
+# Xóa cache cũ (nếu cần)
 st.cache_data.clear()
 st.cache_resource.clear()
-
 DATE_FMT_OUT = "%d-%m-%Y"  # dùng cho hiển thị; khi ghi Excel sẽ set number_format
 
 # ===================== Helpers =====================
 # ===== PN helpers & expanders (đÃ chuẩn hóa theo yêu cầu) =====
-def safe_restart():
-    st.warning("⚠️ Đã phát hiện lỗi bộ nhớ hoặc crash, app sẽ khởi động lại sau 3 giây...")
+def safe_restart(reason="unknown"):
+    """Restart app nhẹ khi gặp lỗi nặng hoặc MemoryError"""
+    st.warning(f"⚠️ Ứng dụng gặp lỗi ({reason}). App sẽ khởi động lại trong giây lát...")
     st.experimental_rerun()
 
 def _replace_tail_full(base_full: int, end_token: str) -> int:
@@ -201,70 +202,78 @@ def pn_expand_rhs(rhs: str, left_full: Optional[str]) -> List[int]:
 
     return out
 
-import re
-
-def parse_pn_cell(raw: str, want_return_suffix=False) -> list[str]:
+def parse_pn_cell(cell_value: str, want_return_suffix: bool) -> List[str]:
     """
-    Tách danh sách số phiếu nhập/xuất từ chuỗi raw.
-    ✅ Bỏ khoảng trắng, ký tự lạ.
-    ✅ Nếu phần sau dấu '-' có >=4 chữ số → dùng làm gốc, không ghép đầu.
-    ✅ Nếu chỉ có 2–3 chữ số → ghép với phần đầu (số phiếu nhập).
-    ✅ Nếu có RETURN → thêm '-R' vào cuối.
+    Tách mọi cụm '<left>-<right>' trong 1 ô, bao gồm cả dạng rút gọn:
+    - 138584-56…91(9) → 138556..138564
+    - 153502-03…37(10) → 153503..153512
+    Bổ sung:
+    ✅ Bỏ ký tự lạ / khoảng trắng trong phần sau dấu ","
+    ✅ Nếu phần sau dấu '-' có >=4 chữ số thì dùng nguyên, không ghép với left
     """
-
-    if not raw or "-" not in raw:
+    s = str(cell_value).strip()
+    if not s:
         return []
+    results: List[str] = []
 
-    try:
-        left, right = raw.split("-", 1)
-    except ValueError:
-        return []
+    # --- Dạng rút gọn: <left>-<short>…<end>(<count>)
+    m = re.fullmatch(r"(\d+)-(\d+)[.…]{3}(\d+)\((\d+)\)", s)
+    if m:
+        left = m.group(1)
+        short_part = m.group(2)
+        end_token = m.group(3)
+        count = int(m.group(4))
 
-    # Làm sạch toàn bộ chuỗi khỏi ký tự lạ, giữ lại số, phẩy, dấu chấm
-    left = re.sub(r"[^0-9]", "", left or "")
-    right = re.sub(r"[^0-9,.\(\)]", "", right or "")
+        base_full = int(left)
+        k_short = len(short_part)
+        if k_short <= len(left):
+            base_full = int(left[:-k_short] + short_part)
+        candidate = _replace_tail_full(base_full, end_token)
+        start = min(base_full, candidate)
+        nums = list(range(start, start + count))
+        results.extend([str(n) for n in nums])
 
-    # Bỏ dấu cách, tab
-    right = right.replace(" ", "")
-
-    # Lấy phần số chính trước khi có dấu "..." hoặc "("
-    right_main = re.split(r"[.(]", right)[0]
-
-    # Tách các phần sau dấu phẩy
-    parts = [p.strip() for p in right_main.split(",") if p.strip()]
-
-    nums = []
-    if not parts:
-        return []
-
-    base = parts[0]
-    nums.append(base)
-
-    # Nếu số gốc (sau dấu "-") có từ 4 chữ số trở lên → dùng làm gốc cho các phần sau
-    use_right_prefix = len(base) >= 4
-    base_prefix = base[:-len(parts[-1])] if len(base) > len(parts[-1]) else ""
-
-    for p in parts[1:]:
-        # Chỉ lấy chữ số
-        p_digits = re.sub(r"\D", "", p)
-        if not p_digits:
+    # --- Dạng bình thường hoặc liệt kê
+    for left, right in re.findall(r"(\d+)\s*-\s*([0-9,().\.]+)", s):
+        # bỏ qua dạng rút gọn vừa xử lý
+        if re.fullmatch(r"\d+[.…]{3}\d+\(\d+\)", right):
             continue
 
-        if use_right_prefix:
-            # Dùng cùng đầu với base
-            next_num = base[:-len(p_digits)] + p_digits
+        # ✅ Làm sạch ký tự lạ, khoảng trắng
+        right = re.sub(r"[^0-9,().\.]", "", right)
+        # Tách từng phần theo dấu phẩy
+        parts = [p.strip() for p in right.split(",") if p.strip()]
+        if not parts:
+            continue
+
+        first = parts[0]
+        use_right_as_base = len(first) >= 4  # ✅ Nếu >=4 chữ số → không ghép left
+
+        # Dựng lại chuỗi right sạch
+        cleaned = ",".join(parts)
+
+        # ✅ Nếu không ghép left thì xử lý riêng từng số
+        if use_right_as_base:
+            for p in parts:
+                p_num = re.sub(r"\D", "", p)
+                if not p_num:
+                    continue
+                results.append(p_num)
         else:
-            # Dùng đầu của phần trái (số phiếu nhập)
-            next_num = left[:-len(p_digits)] + p_digits
+            # Dùng logic cũ (ghép với left)
+            nums = pn_expand_rhs(cleaned, left_full=left)
+            for n in nums:
+                results.append(str(n))
 
-        nums.append(next_num)
-
-    # Thêm hậu tố RETURN nếu cần
-    if want_return_suffix:
-        nums = [f"{n}-R" for n in nums]
-
-    # Loại bỏ trùng và trả về
-    return list(dict.fromkeys(nums))
+    # --- Loại trùng và thêm hậu tố -R nếu cần
+    seen = set()
+    uniq = []
+    for x in results:
+        tag = f"{x}-R" if want_return_suffix else x
+        if tag not in seen:
+            seen.add(tag)
+            uniq.append(tag)
+    return uniq
 
 def parse_pn_simple_table(ws) -> pd.DataFrame:
     """
@@ -452,9 +461,9 @@ def parse_pn_sheet(ws) -> pd.DataFrame:
     return pd.DataFrame(out_rows)
 
 try:
-
     # ===================== UI ================================
     st.title("KIỂM TRA PHIẾU XUẤT - NHẬP - TỒN")
+
     st.markdown("""
     **Bước 1.** Upload **một hoặc nhiều** file Excel.  
     **Bước 2.** Chọn đúng **sheet** cần xử lý trong mỗi file.  
@@ -467,6 +476,7 @@ try:
     if not uploaded_files:
         st.info("Hãy tải lên ít nhất một file Excel.")
         st.stop()
+
     # load workbooks
     workbooks = {}
     file_sheets = {}
