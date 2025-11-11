@@ -8,6 +8,9 @@ import openpyxl
 from openpyxl.styles import numbers
 import streamlit as st
 import os
+import gc  # để dọn bộ nhớ
+st.set_option("server.maxUploadSize", 300)
+st.set_option("server.maxMessageSize", 300)
 
 st.set_page_config(page_title="sachnv_phieuxuatnhap", layout="wide")
 # Xóa cache cũ (nếu cần)
@@ -55,7 +58,7 @@ def write_excel_with_formats(df: pd.DataFrame, file_name: str, sheet_name: str,
        - date_cols: Date format dd-mm-yyyy.
     """
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         # ghi tạm dữ liệu
         df.to_excel(writer, index=False, sheet_name=sheet_name)
         ws = writer.book[sheet_name]
@@ -518,6 +521,8 @@ try:
                         df.insert(0, "File", fname)
                         df.insert(1, "Sheet", sheet)
                         all_rows.append(df)
+                del ws, df  # ✅ thêm dòng này
+                gc.collect()  # ✅ thu hồi RAM
             if not all_rows:
                 st.warning("Không trích xuất được dữ liệu phiếu xuất từ các sheet đã chọn.")
             else:
@@ -527,11 +532,13 @@ try:
                     **{"Ngày xuất": df_all["Ngày xuất"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else ""),
                     "Ngày bàn giao": df_all["Ngày bàn giao"].map(lambda d: d.strftime(DATE_FMT_OUT) if d else "")}
                 ))
+                del all_rows
+                gc.collect()
                 # ✅ Lưu dữ liệu PX để dùng cho phần so sánh BRAVO
                 # Lưu phiên bản rút gọn (chỉ cột cần so sánh)
                 cols_need = ["Mã CT", "Phiếu nhập", "Phiếu xuất"]
                 cols_exist = [c for c in cols_need if c in df_all.columns]
-                st.session_state.last_merged = df_all[cols_exist].copy()
+                st.session_state.last_merged = df_all[cols_exist].to_dict("records")
                 timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
                 write_excel_with_formats(
                     df_all, file_name=f"PX_raw_output_{timestamp}.xlsx", sheet_name="PX_raw",
@@ -550,10 +557,14 @@ try:
                         df.insert(0, "File", fname)
                         df.insert(1, "Sheet", sheet)
                         all_rows.append(df)
+                del ws, df  # ✅ thêm dòng này
+                gc.collect()  # ✅ thu hồi RAM
             if not all_rows:
                 st.warning("Không trích xuất được dữ liệu phiếu nhập từ các sheet đã chọn.")
             else:
                 df_all = pd.concat(all_rows, ignore_index=True)
+                del all_rows
+                gc.collect()
                 # ... trong nhánh if mode == "PN": sau khi df_all = pd.concat(...)
                 order = ["File","Sheet","Số phiếu gốc","Mã CT","Nguồn","Phiếu nhập","Ngày nhập","Ngày bàn giao"]
                 for col in order:
@@ -570,7 +581,7 @@ try:
                 # Lưu phiên bản rút gọn (chỉ cột cần so sánh)
                 cols_need = ["Mã CT", "Phiếu nhập", "Phiếu xuất"]
                 cols_exist = [c for c in cols_need if c in df_all.columns]
-                st.session_state.last_merged = df_all[cols_exist].copy()
+                st.session_state.last_merged = df_all[cols_exist].to_dict("records")
                 # Ghi file: cột phiếu dạng Text, ngày dạng Date dd-mm-yyyy
                 timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
                 write_excel_with_formats(
@@ -601,7 +612,7 @@ try:
         selected_sheets_bravo = {}
         cols = st.columns(min(3, len(uploaded_bravo)))
         for i, f in enumerate(uploaded_bravo):
-            wb = openpyxl.load_workbook(f, read_only=True)
+            df_b = pd.read_excel(f, sheet_name=sheet, usecols=[0,2], engine="openpyxl")
             with cols[i % len(cols)]:
                 st.caption(f"**{f.name}**")
                 selected = st.multiselect(
@@ -611,49 +622,31 @@ try:
                     key=f"bravo_{f.name}"
                 )
                 selected_sheets_bravo[f.name] = selected
-            wb.close()
+            gc.collect()
     if uploaded_bravo and st.session_state.last_merged is not None:
         btn_compare = st.button("⚖️ So sánh với file BRAVO")
         if btn_compare:
             # --- Đọc dữ liệu BRAVO ---
             all_bravo = []
             for f in uploaded_bravo:
-                wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
+                df_b = pd.read_excel(f, sheet_name=sheet, usecols=[0,2], engine="openpyxl")
                 for sheet in selected_sheets_bravo.get(f.name, wb.sheetnames):
-                    ws = wb[sheet]
-                    # Tìm tiêu đề có "Mã" và "Số"
-                    header_row = None
-                    for r in range(1, 10):
-                        row_vals = [ws.cell(r, c).value for c in range(1, 6)]
-                        if any(str(v).strip().upper() == "MÃ" for v in row_vals if v):
-                            header_row = r
-                            break
-                    if not header_row:
-                        continue
-                    col_ma = 1  # A
-                    col_so = 3  # C
-                    rows = []
-                    for r in range(header_row + 1, ws.max_row + 1):
-                        ma = ws.cell(r, col_ma).value
-                        so = ws.cell(r, col_so).value
-                        if ma and so:
-                            ma = str(ma).strip().upper()
-                            # bỏ khoảng trắng trong số
-                            so_text = str(so).strip().replace(" ", "")
-                            rows.append({"Mã": ma, "Số": so_text})
-                    if rows:
-                        df_b = pd.DataFrame(rows)
-                        df_b["File"] = f.name
-                        df_b["Sheet"] = sheet
-                        all_bravo.append(df_b)
+                    df_b = pd.read_excel(f, sheet_name=sheet, usecols=[0,2], engine="openpyxl")
+                    df_b.columns = ["Mã", "Số"]
+                    df_b["File"] = f.name
+                    df_b["Sheet"] = sheet
+                    all_bravo.append(df_b)
+                gc.collect()
             if not all_bravo:
                 st.warning("❌ Không đọc được dữ liệu hợp lệ từ file BRAVO.")
             else:
                 df_bravo = pd.concat(all_bravo, ignore_index=True)
+                del all_bravo
+                gc.collect()
                 st.success(f"✅ Đã đọc {len(df_bravo)} dòng từ {len(uploaded_bravo)} file BRAVO.")
 
                 # --- So sánh ---
-                df_ghep = st.session_state.last_merged.copy()
+                df_ghep = pd.DataFrame(st.session_state.last_merged)
                 df_ghep["Loại"] = df_ghep["Mã CT"].str.upper().str.strip()
                 df_bravo["Loại"] = df_bravo["Mã"].str.upper().str.strip()
 
@@ -672,14 +665,13 @@ try:
                         row_out = row.to_dict()
                         row_out["Trạng thái"] = "" if co_trong_bravo else "⚠️ Bravo không có"
                         result_rows.append(row_out)
-                wb.close()
                 df_result = pd.DataFrame(result_rows)
                 st.dataframe(df_result.head(200))
                 st.info(f"Tổng số dòng: {len(df_result)}")
                 
                 # --- Ghi file Excel với tô màu ---
                 out_path = io.BytesIO()
-                with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+                with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
                     df_result.to_excel(writer, index=False, sheet_name="So_sanh")
                     ws = writer.book["So_sanh"]
                     headers = {cell.value: cell.col_idx for cell in ws[1]}
