@@ -683,26 +683,33 @@ try:
                 st.info(f"Tổng số dòng: {len(df_result)}")
 
                 # --- Ghi file Excel với tô màu ---
+                # --- Ghi file Excel với tô màu ---
                 out_path = io.BytesIO()
                 with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
                     df_result.to_excel(writer, index=False, sheet_name="So_sanh")
-                    ws = writer.sheets["So_sanh"]
-
-                    # Lấy vị trí cột
-                    headers = {v: i for i, v in enumerate(df_result.columns)}
-                    col_trangthai = headers.get("Trạng thái")
-                    col_ngay = headers.get("Ngày nhập")
 
                     workbook = writer.book
-                    yellow = workbook.add_format({"bg_color": "#FFF59D"})
-                    for r, status in enumerate(df_result["Trạng thái"], start=1):
-                        if status == "⚠️ Bravo không có":
-                            ws.write(r, col_trangthai, status, yellow)
-                        elif status == "⚠️ Sai ngày":
-                            ws.write(r, col_trangthai, status, yellow)
-                            if col_ngay is not None:
-                                ws.write(r, col_ngay, str(df_result.loc[r - 1, "Ngày nhập"]), yellow)
+                    worksheet = writer.sheets["So_sanh"]
 
+                    # Xác định vị trí các cột
+                    headers = list(df_result.columns)
+                    col_trangthai = headers.index("Trạng thái") if "Trạng thái" in headers else None
+                    col_ngay = headers.index("Ngày nhập") if "Ngày nhập" in headers else None
+
+                    yellow = workbook.add_format({"bg_color": "#FFF59D"})
+
+                    for r, status in enumerate(df_result["Trạng thái"], start=1):  # bắt đầu từ dòng 2 (index=1)
+                        if status == "⚠️ Bravo không có":
+                            worksheet.write(r, col_trangthai, status, yellow)
+                        elif status == "⚠️ Sai ngày":
+                            worksheet.write(r, col_trangthai, status, yellow)
+                            if col_ngay is not None:
+                                worksheet.write(
+                                    r,
+                                    col_ngay,
+                                    str(df_result.loc[r - 1, "Ngày nhập"]),
+                                    yellow,
+                                )
                 timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
                 st.download_button(
                     "⬇️ Tải file kết quả so sánh",
