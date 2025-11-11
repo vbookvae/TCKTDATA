@@ -9,8 +9,6 @@ from openpyxl.styles import numbers
 import streamlit as st
 import os
 import gc  # để dọn bộ nhớ
-st.set_option("server.maxUploadSize", 300)
-st.set_option("server.maxMessageSize", 300)
 
 st.set_page_config(page_title="sachnv_phieuxuatnhap", layout="wide")
 # Xóa cache cũ (nếu cần)
@@ -623,20 +621,21 @@ try:
                 )
                 selected_sheets_bravo[f.name] = selected
             gc.collect()
+    
     if uploaded_bravo and st.session_state.last_merged is not None:
         btn_compare = st.button("⚖️ So sánh với file BRAVO")
         if btn_compare:
-            # --- Đọc dữ liệu BRAVO ---
             all_bravo = []
             for f in uploaded_bravo:
-                df_b = pd.read_excel(f, sheet_name=sheet, usecols=[0,2], engine="openpyxl")
-                for sheet in selected_sheets_bravo.get(f.name, wb.sheetnames):
-                    df_b = pd.read_excel(f, sheet_name=sheet, usecols=[0,2], engine="openpyxl")
-                    df_b.columns = ["Mã", "Số"]
+                for sheet in selected_sheets_bravo.get(f.name, []):
+                    # đọc cột A (Mã), C (Số), D (Ngày) giả sử ngày xuất nằm cột D
+                    df_b = pd.read_excel(f, sheet_name=sheet, usecols=[0, 2, 3], engine="openpyxl")
+                    df_b.columns = ["Mã", "Số", "Ngày xuất BRAVO"]
                     df_b["File"] = f.name
                     df_b["Sheet"] = sheet
                     all_bravo.append(df_b)
                 gc.collect()
+
             if not all_bravo:
                 st.warning("❌ Không đọc được dữ liệu hợp lệ từ file BRAVO.")
             else:
@@ -645,45 +644,65 @@ try:
                 gc.collect()
                 st.success(f"✅ Đã đọc {len(df_bravo)} dòng từ {len(uploaded_bravo)} file BRAVO.")
 
-                # --- So sánh ---
                 df_ghep = pd.DataFrame(st.session_state.last_merged)
                 df_ghep["Loại"] = df_ghep["Mã CT"].str.upper().str.strip()
                 df_bravo["Loại"] = df_bravo["Mã"].str.upper().str.strip()
 
-                # Chuẩn hóa tên cột so sánh
                 col_map = {"PX": "Phiếu xuất", "PN": "Phiếu nhập"}
                 result_rows = []
                 for loai in ["PX", "PN"]:
                     col_phieu = col_map[loai]
                     df_gh = df_ghep[df_ghep["Loại"] == loai].copy()
                     df_br = df_bravo[df_bravo["Loại"] == loai].copy()
-                    bravo_set = set(df_br["Số"].astype(str).str.replace(" ", ""))
+                    df_br["Số"] = df_br["Số"].astype(str).str.strip().str.replace(" ", "")
+                    df_br["Ngày xuất BRAVO"] = pd.to_datetime(df_br["Ngày xuất BRAVO"], errors="coerce")
+
+                    bravo_map = dict(zip(df_br["Số"], df_br["Ngày xuất BRAVO"]))
 
                     for _, row in df_gh.iterrows():
                         so_phieu = str(row[col_phieu]).strip().replace(" ", "")
-                        co_trong_bravo = so_phieu in bravo_set
+                        ngay_ghep = pd.to_datetime(row.get("Ngày nhập"), errors="coerce")
+                        ngay_bravo = bravo_map.get(so_phieu)
                         row_out = row.to_dict()
-                        row_out["Trạng thái"] = "" if co_trong_bravo else "⚠️ Bravo không có"
+
+                        if so_phieu not in bravo_map:
+                            row_out["Trạng thái"] = "⚠️ Bravo không có"
+                            row_out["Ngày gốc"] = ngay_ghep
+                        else:
+                            if pd.notna(ngay_bravo) and pd.notna(ngay_ghep) and ngay_bravo.date() != ngay_ghep.date():
+                                row_out["Trạng thái"] = "⚠️ Sai ngày"
+                                row_out["Ngày gốc"] = ngay_ghep
+                                row_out["Ngày nhập"] = ngay_bravo  # sửa sang ngày BRAVO
+                            else:
+                                row_out["Trạng thái"] = ""
+                                row_out["Ngày gốc"] = ""
                         result_rows.append(row_out)
+
                 df_result = pd.DataFrame(result_rows)
                 st.dataframe(df_result.head(200))
                 st.info(f"Tổng số dòng: {len(df_result)}")
-                
+
                 # --- Ghi file Excel với tô màu ---
                 out_path = io.BytesIO()
                 with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
                     df_result.to_excel(writer, index=False, sheet_name="So_sanh")
-                    ws = writer.book["So_sanh"]
-                    headers = {cell.value: cell.col_idx for cell in ws[1]}
-                    col_phieu = headers.get("Phiếu nhập") or headers.get("Phiếu xuất")
-                    col_trangthai = headers.get("Trạng thái")
+                    ws = writer.sheets["So_sanh"]
 
-                    yellow = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")
-                    for r in range(2, ws.max_row + 1):
-                        if ws.cell(r, col_trangthai).value == "⚠️ Bravo không có":
-                            if col_phieu:
-                                ws.cell(r, col_phieu).fill = yellow
-                            ws.cell(r, col_trangthai).fill = yellow
+                    # Lấy vị trí cột
+                    headers = {v: i for i, v in enumerate(df_result.columns)}
+                    col_trangthai = headers.get("Trạng thái")
+                    col_ngay = headers.get("Ngày nhập")
+
+                    workbook = writer.book
+                    yellow = workbook.add_format({"bg_color": "#FFF59D"})
+                    for r, status in enumerate(df_result["Trạng thái"], start=1):
+                        if status == "⚠️ Bravo không có":
+                            ws.write(r, col_trangthai, status, yellow)
+                        elif status == "⚠️ Sai ngày":
+                            ws.write(r, col_trangthai, status, yellow)
+                            if col_ngay is not None:
+                                ws.write(r, col_ngay, str(df_result.loc[r - 1, "Ngày nhập"]), yellow)
+
                 timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
                 st.download_button(
                     "⬇️ Tải file kết quả so sánh",
@@ -691,9 +710,8 @@ try:
                     file_name=f"So_sanh_PX_PN_vs_BRAVO_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
-    else:
-        st.info("⚙️ Hãy xử lý file nhập/xuât trước, sau đó tải file BRAVO để so sánh.")
+        else:
+            st.info("⚙️ Hãy xử lý file nhập/xuât trước, sau đó tải file BRAVO để so sánh.")
 
 except MemoryError:
     safe_restart("thiếu bộ nhớ")
